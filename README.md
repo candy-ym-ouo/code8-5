@@ -92,6 +92,9 @@ npm run dev
 - 折角使用 PostgreSQL 部分唯一索引，只约束未删除记录。
 - 完成感受使用 `completion_round` 区分多次读完整本书。
 - 书目和痕迹使用 `version` 防止多端写入覆盖。
+- 批注通过“相对位置（1–10000）+ 锚定时总页数快照 + SHA-256 校验哈希”建立跨页锚点；页码或总页数被修改后，接口与界面仍能重算期望页码、报告偏移并核对引用摘录是否被改动。
+- 批注每次创建与修订都会写入不可变的 `annotation_revisions`；客户端携带 `idempotencyKey`，并在修订事务中对批注行加锁，并发重复修订只落一条记录。
+- 修订记录可通过 `GET /api/v1/annotations/:id/revisions` 追溯，并随 JSON 档案导出（导出 `schemaVersion: 2`）。
 - 所有查询强制带 `userId` 条件，越权资源统一返回 404。
 
 ## 常用命令

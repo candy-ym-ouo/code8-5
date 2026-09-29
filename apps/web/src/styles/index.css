@@ -708,6 +708,74 @@ small,
   letter-spacing: 0.08em;
 }
 
+.anchor-badge {
+  display: inline-block;
+  margin-right: 0.4rem;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: #f4f1ea;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 0.12rem 0.55rem;
+  vertical-align: middle;
+}
+
+.anchor-badge[data-status='MATCH'] {
+  border-color: #b7d7be;
+  background: #eef7f0;
+  color: #2f7a4a;
+}
+
+.anchor-badge[data-status='DRIFTED'] {
+  border-color: #e5c3a6;
+  background: #fdf1e6;
+  color: #a35a1f;
+}
+
+.anchor-warning {
+  color: #a35a1f;
+  font-size: 0.86rem;
+}
+
+.trace-quote {
+  margin: 0.7rem 0;
+  border-left: 3px solid var(--line);
+  padding: 0.2rem 0 0.2rem 0.8rem;
+  color: #5d554a;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.revision-list {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.8rem;
+  border-top: 1px dashed var(--line);
+  padding-top: 0.8rem;
+}
+
+.revision-item {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: #faf7f1;
+  padding: 0.7rem 0.8rem;
+}
+
+.revision-item[data-kind='CREATED'] {
+  background: #f4f1ea;
+}
+
+.revision-quote {
+  margin: 0.5rem 0;
+  font-size: 0.88rem;
+}
+
+.revision-content {
+  margin: 0.5rem 0;
+  font-size: 0.9rem;
+}
+
 .preserve-text {
   margin: 0.8rem 0;
   white-space: pre-wrap;

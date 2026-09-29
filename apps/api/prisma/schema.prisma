@@ -49,6 +49,11 @@ enum ActivityAction {
   COMPLETED
 }
 
+enum AnnotationRevisionKind {
+  CREATED
+  REVISED
+}
+
 model User {
   id           String      @id @default(uuid()) @db.Uuid
   email        String      @unique @db.VarChar(320)
@@ -62,6 +67,7 @@ model User {
   books             Book[]
   dogEars           DogEar[]
   annotations       Annotation[]
+  annotationRevisions AnnotationRevision[]
   rereadMarks       RereadMark[]
   reflections       CompletionReflection[]
   activityEvents    ActivityEvent[]
@@ -101,6 +107,7 @@ model Book {
   user          User                   @relation(fields: [userId], references: [id], onDelete: Restrict)
   dogEars       DogEar[]
   annotations   Annotation[]
+  revisions     AnnotationRevision[]
   rereadMarks   RereadMark[]
   reflections   CompletionReflection[]
   activityEvents ActivityEvent[]
@@ -131,23 +138,59 @@ model DogEar {
 }
 
 model Annotation {
-  id        String    @id @default(uuid()) @db.Uuid
-  userId    String    @map("user_id") @db.Uuid
-  bookId    String    @map("book_id") @db.Uuid
-  version   Int       @default(1)
-  startPage Int       @map("start_page")
-  endPage   Int       @map("end_page")
-  content   String
-  createdAt DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
-  updatedAt DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
-  deletedAt DateTime? @map("deleted_at") @db.Timestamptz(3)
+  id                 String    @id @default(uuid()) @db.Uuid
+  userId             String    @map("user_id") @db.Uuid
+  bookId             String    @map("book_id") @db.Uuid
+  version            Int       @default(1)
+  startPage          Int       @map("start_page")
+  endPage            Int       @map("end_page")
+  content            String
+  quote              String?   @db.VarChar(2000)
+  anchorLabel        String?   @map("anchor_label") @db.VarChar(300)
+  anchorStart        Int?      @map("anchor_start")
+  anchorEnd          Int?      @map("anchor_end")
+  anchoredPageCount  Int?      @map("anchored_page_count")
+  anchorHash         String?   @map("anchor_hash") @db.Char(64)
+  createdAt          DateTime  @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt          DateTime  @updatedAt @map("updated_at") @db.Timestamptz(3)
+  deletedAt          DateTime? @map("deleted_at") @db.Timestamptz(3)
 
-  user User @relation(fields: [userId], references: [id], onDelete: Restrict)
-  book Book @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  user      User                 @relation(fields: [userId], references: [id], onDelete: Restrict)
+  book      Book                 @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  revisions AnnotationRevision[]
 
   @@index([userId, deletedAt, createdAt])
   @@index([bookId, startPage, endPage, deletedAt])
   @@map("annotations")
+}
+
+model AnnotationRevision {
+  id                String                   @id @default(uuid()) @db.Uuid
+  userId            String                   @map("user_id") @db.Uuid
+  bookId            String                   @map("book_id") @db.Uuid
+  annotationId      String                   @map("annotation_id") @db.Uuid
+  revisionNo        Int                      @map("revision_no")
+  kind              AnnotationRevisionKind
+  startPage         Int                      @map("start_page")
+  endPage           Int                      @map("end_page")
+  content           String
+  quote             String?                  @db.VarChar(2000)
+  anchorLabel       String?                  @map("anchor_label") @db.VarChar(300)
+  anchorStart       Int?                     @map("anchor_start")
+  anchorEnd         Int?                     @map("anchor_end")
+  anchoredPageCount Int?                     @map("anchored_page_count")
+  anchorHash        String?                  @map("anchor_hash") @db.Char(64)
+  idempotencyKey    String?                  @map("idempotency_key") @db.VarChar(64)
+  createdAt         DateTime                 @default(now()) @map("created_at") @db.Timestamptz(3)
+
+  user       User       @relation(fields: [userId], references: [id], onDelete: Restrict)
+  book       Book       @relation(fields: [bookId], references: [id], onDelete: Restrict)
+  annotation Annotation @relation(fields: [annotationId], references: [id], onDelete: Restrict)
+
+  @@unique([userId, idempotencyKey])
+  @@index([annotationId, revisionNo])
+  @@index([userId, createdAt])
+  @@map("annotation_revisions")
 }
 
 model RereadMark {

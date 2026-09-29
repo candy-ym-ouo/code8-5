@@ -12,6 +12,7 @@ import {
   MOOD_LABELS,
   STATUS_LABELS,
   TRACE_LABELS,
+  type AnnotationRevision,
   type Book,
   type BookStatus,
   type MoodTag,
@@ -23,6 +24,11 @@ import { timelineApi } from '../api';
 
 type DeletedItem = { kind: 'DOG_EAR' | 'ANNOTATION' | 'REREAD_MARK' | 'REFLECTION'; id: string; label: string };
 type ReflectionEdit = { id: string; version: number; moodTags: MoodTag[]; text: string };
+
+function newIdempotencyKey(): string {
+  if (typeof crypto !== 'undefined' && 'randomUUID' in crypto) return crypto.randomUUID();
+  return `idm-${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+}
 
 const route = useRoute();
 const router = useRouter();
@@ -47,12 +53,17 @@ const traceForm = reactive({
   reason: '',
   startPage: '',
   endPage: '',
-  content: ''
+  content: '',
+  quote: '',
+  anchorLabel: ''
 });
 const completeForm = reactive({
   moodTags: [] as MoodTag[],
   text: ''
 });
+const revisionHistory = ref<Record<string, AnnotationRevision[]>>({});
+const revisionLoading = ref<string | null>(null);
+const formIdempotencyKey = ref(newIdempotencyKey());
 
 const tabs = computed(() => [
   { value: 'PAGES' as const, label: '按页' },
@@ -96,6 +107,50 @@ function traceRange(trace: Trace): string {
 
 function traceBody(trace: Trace): string {
   return trace.type === 'ANNOTATION' ? trace.content : trace.reason || '未填写原因';
+}
+
+function anchorHint(trace: Trace): string {
+  if (trace.type !== 'ANNOTATION' || !trace.anchor) return '';
+  if (trace.anchor.status === 'MATCH') return '锚点与当前页码、摘录一致';
+  if (trace.anchor.status === 'MISSING') return '书目当前没有总页数，无法校验锚点';
+  const parts: string[] = [];
+  if (trace.anchor.expectedStartPage !== null && trace.anchor.expectedEndPage !== null) {
+    const expectedRange =
+      trace.anchor.expectedStartPage === trace.anchor.expectedEndPage
+        ? `第 ${trace.anchor.expectedStartPage} 页`
+        : `第 ${trace.anchor.expectedStartPage}–${trace.anchor.expectedEndPage} 页`;
+    parts.push(`按锚点应位于 ${expectedRange}`);
+  }
+  if (trace.anchor.quoteChanged) parts.push('引用摘录与锚定快照不一致');
+  return parts.join('；') || '锚点已偏移';
+}
+
+function formatOffset(value: number | null): string {
+  if (value === null || value === 0) return '0';
+  return value > 0 ? `+${value}` : `${value}`;
+}
+
+function revisionRange(revision: AnnotationRevision): string {
+  return revision.startPage === revision.endPage
+    ? `第 ${revision.startPage} 页`
+    : `第 ${revision.startPage}–${revision.endPage} 页`;
+}
+
+async function toggleRevisions(trace: Trace): Promise<void> {
+  if (trace.type !== 'ANNOTATION') return;
+  if (revisionHistory.value[trace.id]) {
+    delete revisionHistory.value[trace.id];
+    return;
+  }
+  revisionLoading.value = trace.id;
+  try {
+    const result = await traceApi.annotationRevisions(trace.id);
+    revisionHistory.value[trace.id] = result.items;
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : '修订历史加载失败';
+  } finally {
+    revisionLoading.value = null;
+  }
 }
 
 function canEditReflection(reflection: Reflection): boolean {
@@ -143,12 +198,15 @@ function resetTraceForm(): void {
   traceForm.startPage = '';
   traceForm.endPage = '';
   traceForm.content = '';
+  traceForm.quote = '';
+  traceForm.anchorLabel = '';
 }
 
 function openCreate(type: TraceType): void {
   createType.value = type;
   editing.value = null;
   resetTraceForm();
+  formIdempotencyKey.value = newIdempotencyKey();
   error.value = '';
 }
 
@@ -160,10 +218,13 @@ function openEdit(trace: Trace): void {
     traceForm.startPage = String(trace.startPage);
     traceForm.endPage = String(trace.endPage);
     traceForm.content = trace.content;
+    traceForm.quote = trace.quote ?? '';
+    traceForm.anchorLabel = trace.anchorLabel ?? '';
   } else {
     traceForm.pageNumber = String(trace.pageNumber);
     traceForm.reason = trace.reason ?? '';
   }
+  formIdempotencyKey.value = newIdempotencyKey();
   error.value = '';
 }
 
@@ -182,7 +243,10 @@ async function submitTrace(): Promise<void> {
       await traceApi.createAnnotation(book.value.id, {
         startPage: Number(traceForm.startPage),
         endPage: Number(traceForm.endPage || traceForm.startPage),
-        content: traceForm.content
+        content: traceForm.content,
+        quote: traceForm.quote.trim() || null,
+        anchorLabel: traceForm.anchorLabel.trim() || null,
+        idempotencyKey: formIdempotencyKey.value
       });
     } else if (createType.value === 'REREAD_MARK') {
       await traceApi.createReread(book.value.id, {
@@ -200,6 +264,9 @@ async function submitTrace(): Promise<void> {
         startPage: Number(traceForm.startPage),
         endPage: Number(traceForm.endPage || traceForm.startPage),
         content: traceForm.content,
+        quote: traceForm.quote.trim() || null,
+        anchorLabel: traceForm.anchorLabel.trim() || null,
+        idempotencyKey: formIdempotencyKey.value,
         version: editing.value.version
       });
     } else if (editing.value?.type === 'REREAD_MARK') {
@@ -457,7 +524,18 @@ onMounted(load);
             <label>起始页<input v-model="traceForm.startPage" type="number" min="1" required /></label>
             <label>结束页<input v-model="traceForm.endPage" type="number" min="1" placeholder="单页可留空" /></label>
           </div>
+          <label>
+            引用摘录（可选，便于日后核对原文）
+            <textarea v-model="traceForm.quote" rows="3" maxlength="2000" placeholder="抄录批注对应的书页原文。总页数修改后，可用它校验锚点。" />
+          </label>
+          <label>
+            锚点位置说明（可选）
+            <input v-model="traceForm.anchorLabel" type="text" maxlength="300" placeholder="例如：第三章 · 第二节" />
+          </label>
           <label>批注<textarea v-model="traceForm.content" rows="5" maxlength="5000" required /></label>
+          <p class="muted">
+            批注会按“相对位置 + 锚定时总页数”建立跨页锚点；同一份批注的并发修订只保留一次，旧引用与当前摘录可在修订记录中追溯。
+          </p>
         </template>
         <template v-else>
           <label>页码<input v-model="traceForm.pageNumber" type="number" min="1" required /></label>
@@ -538,14 +616,71 @@ onMounted(load);
             <div>
               <span class="trace-type">{{ TRACE_LABELS[trace.type] }}</span>
               <strong>{{ traceRange(trace) }}</strong>
+              <span
+                v-if="trace.type === 'ANNOTATION' && trace.anchor"
+                class="anchor-badge"
+                :data-status="trace.anchor.status"
+              >
+                {{ trace.anchor.status === 'MATCH' ? '锚点一致' : trace.anchor.status === 'MISSING' ? '锚点待校验' : '锚点偏移' }}
+              </span>
             </div>
             <div class="button-row">
+              <button
+                v-if="trace.type === 'ANNOTATION'"
+                class="text-button"
+                type="button"
+                :disabled="revisionLoading === trace.id"
+                @click="toggleRevisions(trace)"
+              >
+                {{ revisionHistory[trace.id] ? '收起修订' : '修订记录' }}
+              </button>
               <button class="text-button" type="button" @click="openEdit(trace)">编辑</button>
               <button class="text-button danger-text" type="button" @click="deleteTrace(trace)">删除</button>
             </div>
           </div>
+          <blockquote v-if="trace.type === 'ANNOTATION' && trace.quote" class="trace-quote">
+            {{ trace.quote }}
+          </blockquote>
+          <p v-if="trace.type === 'ANNOTATION' && trace.anchorLabel" class="muted">
+            锚点位置：{{ trace.anchorLabel }}
+            <template v-if="trace.anchoredPageCount"> · 锚定于 {{ trace.anchoredPageCount }} 页版本</template>
+          </p>
           <p class="preserve-text">{{ traceBody(trace) }}</p>
+          <p v-if="trace.type === 'ANNOTATION' && trace.anchor && trace.anchor.status === 'DRIFTED'" class="anchor-warning">
+            ⚠ {{ anchorHint(trace) }}
+            <template v-if="trace.anchor.startOffset !== null">
+              （起始页偏移 {{ formatOffset(trace.anchor.startOffset) }}，结束页偏移 {{ formatOffset(trace.anchor.endOffset) }}）
+            </template>
+          </p>
           <p class="muted">创建 {{ formatDateTime(trace.createdAt) }} · 更新 {{ formatDateTime(trace.updatedAt) }}</p>
+
+          <div v-if="trace.type === 'ANNOTATION' && revisionHistory[trace.id]" class="revision-list">
+            <div
+              v-for="revision in revisionHistory[trace.id]"
+              :key="revision.id"
+              class="revision-item"
+              :data-kind="revision.kind"
+            >
+              <div class="trace-card-heading">
+                <div>
+                  <span class="trace-type">{{ revision.kind === 'CREATED' ? `初版 · ${revisionRange(revision)}` : `第 ${revision.revisionNo} 次修订 · ${revisionRange(revision)}` }}</span>
+                  <span
+                    class="anchor-badge"
+                    :data-status="revision.anchor?.status ?? 'MISSING'"
+                  >
+                    {{ revision.anchor?.status === 'MATCH' ? '锚点一致' : revision.anchor?.status === 'DRIFTED' ? '锚点偏移' : '锚点待校验' }}
+                  </span>
+                  <span v-if="!revision.quoteMatchesCurrent" class="anchor-badge" data-status="DRIFTED">旧引用与当前摘录不同</span>
+                </div>
+                <time :datetime="revision.createdAt">{{ formatDateTime(revision.createdAt) }}</time>
+              </div>
+              <blockquote v-if="revision.quote" class="trace-quote revision-quote">{{ revision.quote }}</blockquote>
+              <p class="preserve-text revision-content">{{ revision.content }}</p>
+              <p v-if="revision.anchor?.status === 'DRIFTED'" class="anchor-warning">
+                ⚠ {{ revision.quoteMatchesCurrent ? '按当前总页数推算，该版本页码已偏移' : '旧引用与当前摘录不同' }}
+              </p>
+            </div>
+          </div>
         </article>
         <p v-if="visibleTraces.length === 0" class="empty-inline">这个分类还没有留下痕迹。</p>
       </div>

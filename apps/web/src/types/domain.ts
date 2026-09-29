@@ -44,6 +44,18 @@ export interface DogEar {
   updatedAt: string;
 }
 
+export type AnchorStatus = 'MATCH' | 'DRIFTED' | 'MISSING';
+
+export interface AnchorCheck {
+  status: AnchorStatus;
+  anchoredPageCount: number | null;
+  expectedStartPage: number | null;
+  expectedEndPage: number | null;
+  startOffset: number | null;
+  endOffset: number | null;
+  quoteChanged: boolean;
+}
+
 export interface Annotation {
   id: string;
   bookId: string;
@@ -51,9 +63,41 @@ export interface Annotation {
   startPage: number;
   endPage: number;
   content: string;
+  quote: string | null;
+  anchorLabel: string | null;
+  anchorStart: number | null;
+  anchorEnd: number | null;
+  anchoredPageCount: number | null;
+  anchorHash: string | null;
+  anchor: AnchorCheck | null;
   version: number;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface AnnotationRevision {
+  id: string;
+  annotationId: string;
+  revisionNo: number;
+  kind: 'CREATED' | 'REVISED';
+  startPage: number;
+  endPage: number;
+  content: string;
+  quote: string | null;
+  anchorLabel: string | null;
+  anchorStart: number | null;
+  anchorEnd: number | null;
+  anchoredPageCount: number | null;
+  anchorHash: string | null;
+  createdAt: string;
+  quoteMatchesCurrent: boolean;
+  anchor: {
+    status: AnchorStatus;
+    expectedStartPage: number | null;
+    expectedEndPage: number | null;
+    startOffset: number | null;
+    endOffset: number | null;
+  } | null;
 }
 
 export interface RereadMark {
