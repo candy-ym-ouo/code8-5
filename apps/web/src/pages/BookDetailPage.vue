@@ -8,10 +8,13 @@ import ErrorNotice from '../components/ErrorNotice.vue';
 import MoodPicker from '../components/MoodPicker.vue';
 import {
   ACTION_LABELS,
+  ANCHOR_ISSUE_LABELS,
   ENTITY_LABELS,
   MOOD_LABELS,
   STATUS_LABELS,
   TRACE_LABELS,
+  type AnnotationRevision,
+  type AnnotationVerificationResult,
   type Book,
   type BookStatus,
   type MoodTag,
@@ -47,8 +50,12 @@ const traceForm = reactive({
   reason: '',
   startPage: '',
   endPage: '',
-  content: ''
+  content: '',
+  quote: ''
 });
+const verificationByAnnotation = ref<Record<string, AnnotationVerificationResult>>({});
+const revisionsByAnnotation = ref<Record<string, AnnotationRevision[]>>({});
+const expandedRevisionId = ref<string | null>(null);
 const completeForm = reactive({
   moodTags: [] as MoodTag[],
   text: ''
@@ -143,6 +150,7 @@ function resetTraceForm(): void {
   traceForm.startPage = '';
   traceForm.endPage = '';
   traceForm.content = '';
+  traceForm.quote = '';
 }
 
 function openCreate(type: TraceType): void {
@@ -160,11 +168,46 @@ function openEdit(trace: Trace): void {
     traceForm.startPage = String(trace.startPage);
     traceForm.endPage = String(trace.endPage);
     traceForm.content = trace.content;
+    traceForm.quote = trace.quote ?? '';
   } else {
     traceForm.pageNumber = String(trace.pageNumber);
     traceForm.reason = trace.reason ?? '';
   }
   error.value = '';
+}
+
+function traceAnchorSnapshot(trace: Trace): string {
+  if (trace.type !== 'ANNOTATION') return '';
+  return trace.anchorPageCount ? `锚点总页数 ${trace.anchorPageCount}` : '锚点未记录总页数';
+}
+
+async function verifyAnnotation(trace: Trace): Promise<void> {
+  if (trace.type !== 'ANNOTATION') return;
+  error.value = '';
+  try {
+    const result = await traceApi.verifyAnnotation(trace.id);
+    verificationByAnnotation.value = { ...verificationByAnnotation.value, [trace.id]: result };
+    success.value = result.valid ? '锚点与摘录校验通过' : '校验发现差异，请查看标记';
+  } catch (caught) {
+    error.value = caught instanceof ApiError ? caught.message : '校验失败';
+  }
+}
+
+async function toggleRevisions(trace: Trace): Promise<void> {
+  if (trace.type !== 'ANNOTATION') return;
+  if (expandedRevisionId.value === trace.id) {
+    expandedRevisionId.value = null;
+    return;
+  }
+  expandedRevisionId.value = trace.id;
+  if (!revisionsByAnnotation.value[trace.id]) {
+    try {
+      const result = await traceApi.annotationRevisions(trace.id);
+      revisionsByAnnotation.value = { ...revisionsByAnnotation.value, [trace.id]: result.items };
+    } catch (caught) {
+      error.value = caught instanceof ApiError ? caught.message : '修订记录加载失败';
+    }
+  }
 }
 
 async function submitTrace(): Promise<void> {
@@ -182,7 +225,8 @@ async function submitTrace(): Promise<void> {
       await traceApi.createAnnotation(book.value.id, {
         startPage: Number(traceForm.startPage),
         endPage: Number(traceForm.endPage || traceForm.startPage),
-        content: traceForm.content
+        content: traceForm.content,
+        quote: traceForm.quote.trim() ? traceForm.quote.trim() : null
       });
     } else if (createType.value === 'REREAD_MARK') {
       await traceApi.createReread(book.value.id, {
@@ -200,6 +244,7 @@ async function submitTrace(): Promise<void> {
         startPage: Number(traceForm.startPage),
         endPage: Number(traceForm.endPage || traceForm.startPage),
         content: traceForm.content,
+        quote: traceForm.quote.trim() ? traceForm.quote.trim() : null,
         version: editing.value.version
       });
     } else if (editing.value?.type === 'REREAD_MARK') {
@@ -212,6 +257,7 @@ async function submitTrace(): Promise<void> {
     createType.value = null;
     editing.value = null;
     success.value = '阅读痕迹已保存';
+    verificationByAnnotation.value = {};
     await load();
   } catch (caught) {
     error.value = caught instanceof ApiError ? caught.message : '保存失败，请检查输入';
@@ -458,6 +504,18 @@ onMounted(load);
             <label>结束页<input v-model="traceForm.endPage" type="number" min="1" placeholder="单页可留空" /></label>
           </div>
           <label>批注<textarea v-model="traceForm.content" rows="5" maxlength="5000" required /></label>
+          <label>
+            引用摘录（可选，跨页锚点会一并校验）
+            <textarea
+              v-model="traceForm.quote"
+              rows="3"
+              maxlength="2000"
+              placeholder="摘录书页原文；留空表示这条批注不绑定原文。"
+            />
+          </label>
+          <p v-if="editing?.type === 'ANNOTATION'" class="muted">
+            当前锚点创建时总页数：{{ editing.anchorPageCount ?? '未填写' }}。移动锚点后会按当前总页数重新记录。
+          </p>
         </template>
         <template v-else>
           <label>页码<input v-model="traceForm.pageNumber" type="number" min="1" required /></label>
@@ -545,6 +603,57 @@ onMounted(load);
             </div>
           </div>
           <p class="preserve-text">{{ traceBody(trace) }}</p>
+          <blockquote v-if="trace.type === 'ANNOTATION' && trace.quote" class="quote-excerpt">
+            {{ trace.quote }}
+          </blockquote>
+          <p v-if="trace.type === 'ANNOTATION'" class="muted">{{ traceAnchorSnapshot(trace) }}</p>
+          <div v-if="trace.type === 'ANNOTATION'" class="button-row">
+            <button class="text-button" type="button" @click="verifyAnnotation(trace)">校验锚点与摘录</button>
+            <button class="text-button" type="button" @click="toggleRevisions(trace)">
+              {{ expandedRevisionId === trace.id ? '收起修订记录' : '查看旧引用与修订' }}
+            </button>
+          </div>
+          <div
+            v-if="trace.type === 'ANNOTATION' && verificationByAnnotation[trace.id]"
+            class="verification-panel"
+            :class="verificationByAnnotation[trace.id].valid ? 'verification-ok' : 'verification-warn'"
+          >
+            <template v-if="verificationByAnnotation[trace.id].valid">
+              校验通过：页码与总页数快照一致，引用摘录哈希匹配。
+            </template>
+            <template v-else>
+              <p v-for="issue in verificationByAnnotation[trace.id].issues" :key="issue" class="verification-issue">
+                ⚠ {{ ANCHOR_ISSUE_LABELS[issue] }}
+              </p>
+            </template>
+          </div>
+          <div v-if="trace.type === 'ANNOTATION' && expandedRevisionId === trace.id" class="revision-list">
+            <article v-for="revision in revisionsByAnnotation[trace.id] ?? []" :key="revision.id" class="revision-item">
+              <div class="trace-card-heading">
+                <strong>第 {{ revision.revisionNumber }} 版</strong>
+                <time>{{ formatDateTime(revision.createdAt) }}</time>
+              </div>
+              <p class="muted">
+                第 {{ revision.startPage }}–{{ revision.endPage }} 页 · 锚点总页数
+                {{ revision.anchorPageCount ?? '未填写' }}
+              </p>
+              <p class="preserve-text">{{ revision.content }}</p>
+              <blockquote v-if="revision.quote" class="quote-excerpt">{{ revision.quote }}</blockquote>
+              <p v-if="revision.verification.valid" class="verification-ok verification-line">
+                该版旧引用校验通过
+              </p>
+              <p
+                v-for="issue in revision.verification.issues"
+                :key="issue"
+                class="verification-warn verification-line"
+              >
+                ⚠ {{ ANCHOR_ISSUE_LABELS[issue] }}
+              </p>
+            </article>
+            <p v-if="(revisionsByAnnotation[trace.id] ?? []).length === 0" class="empty-inline">
+              正在读取修订记录…
+            </p>
+          </div>
           <p class="muted">创建 {{ formatDateTime(trace.createdAt) }} · 更新 {{ formatDateTime(trace.updatedAt) }}</p>
         </article>
         <p v-if="visibleTraces.length === 0" class="empty-inline">这个分类还没有留下痕迹。</p>

@@ -1,6 +1,8 @@
 import { api } from './client';
 import type {
   Annotation,
+  AnnotationRevision,
+  AnnotationVerificationResult,
   Book,
   BookStatus,
   DogEar,
@@ -57,14 +59,26 @@ export const traceApi = {
     api.patch<{ dogEar: DogEar }>(`/dog-ears/${id}`, body),
   deleteDogEar: (id: string, version: number) => api.delete<void>(`/dog-ears/${id}`, { version }),
   restoreDogEar: (id: string) => api.post<{ dogEar: DogEar }>(`/dog-ears/${id}/restore`),
-  createAnnotation: (bookId: string, body: { startPage: number; endPage: number; content: string }) =>
-    api.post<{ annotation: Annotation }>(`/books/${bookId}/annotations`, body),
+  createAnnotation: (
+    bookId: string,
+    body: { startPage: number; endPage: number; content: string; quote?: string | null }
+  ) => api.post<{ annotation: Annotation }>(`/books/${bookId}/annotations`, body),
   updateAnnotation: (
     id: string,
-    body: { startPage?: number; endPage?: number; content?: string; version: number }
-  ) => api.patch<{ annotation: Annotation }>(`/annotations/${id}`, body),
+    body: {
+      startPage?: number;
+      endPage?: number;
+      content?: string;
+      quote?: string | null;
+      version: number;
+    }
+  ) => api.patch<{ annotation: Annotation; idempotent?: boolean }>(`/annotations/${id}`, body),
   deleteAnnotation: (id: string, version: number) => api.delete<void>(`/annotations/${id}`, { version }),
   restoreAnnotation: (id: string) => api.post<{ annotation: Annotation }>(`/annotations/${id}/restore`),
+  verifyAnnotation: (id: string) =>
+    api.get<AnnotationVerificationResult>(`/annotations/${id}/verify`),
+  annotationRevisions: (id: string) =>
+    api.get<{ items: AnnotationRevision[] }>(`/annotations/${id}/revisions`),
   createReread: (bookId: string, body: { pageNumber: number; reason: string | null }) =>
     api.post<{ rereadMark: RereadMark }>(`/books/${bookId}/reread-marks`, body),
   updateReread: (id: string, body: { pageNumber?: number; reason?: string | null; version: number }) =>

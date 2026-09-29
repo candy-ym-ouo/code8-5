@@ -44,6 +44,19 @@ export interface DogEar {
   updatedAt: string;
 }
 
+export type AnchorIssue =
+  | 'PAGE_COUNT_CHANGED'
+  | 'PAGE_COUNT_CLEARED'
+  | 'OUT_OF_RANGE'
+  | 'QUOTE_HASH_MISMATCH';
+
+export interface AnchorVerification {
+  valid: boolean;
+  issues: AnchorIssue[];
+  currentPageCount: number | null;
+  quoteVerified: boolean;
+}
+
 export interface Annotation {
   id: string;
   bookId: string;
@@ -51,10 +64,33 @@ export interface Annotation {
   startPage: number;
   endPage: number;
   content: string;
+  quote: string;
+  quoteHash: string | null;
+  anchorPageCount: number | null;
   version: number;
   createdAt: string;
   updatedAt: string;
 }
+
+export interface AnnotationRevision {
+  id: string;
+  annotationId: string;
+  revisionNumber: number;
+  startPage: number;
+  endPage: number;
+  content: string;
+  quote: string;
+  quoteHash: string | null;
+  anchorPageCount: number | null;
+  createdAt: string;
+  verification: AnchorVerification;
+}
+
+export type AnnotationVerificationResult = AnchorVerification & {
+  annotationId: string;
+  anchorPageCount: number | null;
+  checkedAt: string;
+};
 
 export interface RereadMark {
   id: string;
@@ -140,4 +176,11 @@ export const ENTITY_LABELS: Record<ActivityEntityType, string> = {
   ANNOTATION: '批注',
   REREAD_MARK: '重读页',
   COMPLETION_REFLECTION: '完成感受'
+};
+
+export const ANCHOR_ISSUE_LABELS: Record<AnchorIssue, string> = {
+  PAGE_COUNT_CHANGED: '总页数与锚点创建时不同',
+  PAGE_COUNT_CLEARED: '总页数已被清空',
+  OUT_OF_RANGE: '锚点页码超出当前总页数',
+  QUOTE_HASH_MISMATCH: '引用摘录与保存时不一致'
 };

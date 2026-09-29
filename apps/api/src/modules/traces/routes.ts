@@ -5,7 +5,16 @@ import { TRACE_TYPES, type TraceType } from '@paper-book-traces/shared';
 import { prisma } from '../../lib/prisma.js';
 import { AppError, zodFields } from '../../lib/errors.js';
 import { currentUser, requireAuth } from '../../lib/auth.js';
-import { isRestoreWindowOpen, normalizeText, validatePageRange, validateSinglePage } from '../../lib/domain.js';
+import {
+  QUOTE_MAX_LENGTH,
+  isRestoreWindowOpen,
+  normalizeText,
+  quoteHash,
+  resolveRevisionQuote,
+  validatePageRange,
+  validateSinglePage,
+  verifyAnchor
+} from '../../lib/domain.js';
 import { writeEvent } from '../../lib/events.js';
 import { optionalDate, paginationFromQuery, parseId } from '../../lib/http.js';
 
@@ -30,10 +39,16 @@ const dogEarUpdateSchema = z
     message: '至少提供一个要更新的字段'
   });
 
+const optionalQuote = z.preprocess(
+  (value) => (value === '' ? null : value),
+  z.string().trim().max(QUOTE_MAX_LENGTH).nullable().optional()
+);
+
 const annotationCreateSchema = z.object({
   startPage: z.number().int().positive(),
   endPage: z.number().int().positive(),
-  content: z.string().trim().min(1, '请输入批注').max(5000)
+  content: z.string().trim().min(1, '请输入批注').max(5000),
+  quote: optionalQuote
 });
 
 const annotationUpdateSchema = z
@@ -41,11 +56,19 @@ const annotationUpdateSchema = z
     startPage: z.number().int().positive().optional(),
     endPage: z.number().int().positive().optional(),
     content: z.string().trim().min(1).max(5000).optional(),
+    quote: optionalQuote,
     version: z.number().int().positive().optional()
   })
-  .refine((value) => value.startPage !== undefined || value.endPage !== undefined || value.content !== undefined, {
-    message: '至少提供一个要更新的字段'
-  });
+  .refine(
+    (value) =>
+      value.startPage !== undefined ||
+      value.endPage !== undefined ||
+      value.content !== undefined ||
+      value.quote !== undefined,
+    {
+      message: '至少提供一个要更新的字段'
+    }
+  );
 
 const rereadCreateSchema = z.object({
   pageNumber: z.number().int().positive(),
@@ -83,10 +106,52 @@ function serializeAnnotation(item: {
   startPage: number;
   endPage: number;
   content: string;
+  quoteText: string | null;
+  quoteHash: string | null;
+  anchorPageCount: number | null;
   createdAt: Date;
   updatedAt: Date;
 }) {
-  return { ...item, type: 'ANNOTATION' as const };
+  return {
+    id: item.id,
+    bookId: item.bookId,
+    version: item.version,
+    startPage: item.startPage,
+    endPage: item.endPage,
+    content: item.content,
+    quote: item.quoteText ?? '',
+    quoteHash: item.quoteHash,
+    anchorPageCount: item.anchorPageCount,
+    createdAt: item.createdAt,
+    updatedAt: item.updatedAt,
+    type: 'ANNOTATION' as const
+  };
+}
+
+function serializeRevision(item: {
+  id: string;
+  annotationId: string;
+  revisionNumber: number;
+  startPage: number;
+  endPage: number;
+  content: string;
+  quoteText: string | null;
+  quoteHash: string | null;
+  anchorPageCount: number | null;
+  createdAt: Date;
+}) {
+  return {
+    id: item.id,
+    annotationId: item.annotationId,
+    revisionNumber: item.revisionNumber,
+    startPage: item.startPage,
+    endPage: item.endPage,
+    content: item.content,
+    quote: item.quoteText ?? '',
+    quoteHash: item.quoteHash,
+    anchorPageCount: item.anchorPageCount,
+    createdAt: item.createdAt
+  };
 }
 
 function serializeRereadMark(item: {
@@ -159,7 +224,14 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
               bookId,
               deletedAt: null,
               ...(pageNumber ? { startPage: { lte: pageNumber }, endPage: { gte: pageNumber } } : {}),
-              ...(keyword ? { content: { contains: keyword, mode: 'insensitive' } } : {}),
+              ...(keyword
+                ? {
+                    OR: [
+                      { content: { contains: keyword, mode: 'insensitive' } },
+                      { quoteText: { contains: keyword, mode: 'insensitive' } }
+                    ]
+                  }
+                : {}),
               ...(from || to ? { createdAt: dateFilter } : {})
             },
             orderBy: { createdAt: 'desc' }
@@ -346,6 +418,9 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     const book = await prisma.book.findFirst({ where: { id: bookId, userId, deletedAt: null } });
     if (!book) throw new AppError(404, 'NOT_FOUND', '书目不存在');
     validatePageRange(parsed.data.startPage, parsed.data.endPage, book.pageCount);
+    const content = normalizeText(parsed.data.content);
+    const quoteText = parsed.data.quote ? normalizeText(parsed.data.quote) : null;
+    const quoteDigest = quoteText ? quoteHash(quoteText) : null;
     const annotation = await prisma.$transaction(async (tx) => {
       const created = await tx.annotation.create({
         data: {
@@ -353,7 +428,25 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
           bookId,
           startPage: parsed.data.startPage,
           endPage: parsed.data.endPage,
-          content: normalizeText(parsed.data.content)
+          content,
+          quoteText,
+          quoteHash: quoteDigest,
+          anchorPageCount: book.pageCount
+        }
+      });
+      await tx.annotationRevision.create({
+        data: {
+          annotationId: created.id,
+          userId,
+          bookId,
+          revisionNumber: 1,
+          startPage: created.startPage,
+          endPage: created.endPage,
+          content: created.content,
+          quoteText,
+          quoteHash: quoteDigest,
+          anchorPageCount: created.anchorPageCount,
+          createdAt: created.createdAt
         }
       });
       await writeEvent(tx, {
@@ -362,7 +455,14 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
         entityType: 'ANNOTATION',
         entityId: created.id,
         action: 'CREATED',
-        payload: { startPage: created.startPage, endPage: created.endPage, summary: eventSummary(created.content) }
+        payload: {
+          revisionNumber: 1,
+          startPage: created.startPage,
+          endPage: created.endPage,
+          anchorPageCount: created.anchorPageCount,
+          hasQuote: quoteText !== null,
+          summary: eventSummary(created.content)
+        }
       });
       return created;
     });
@@ -383,28 +483,130 @@ export const traceRoutes: FastifyPluginAsync = async (app) => {
     const startPage = parsed.data.startPage ?? existing.startPage;
     const endPage = parsed.data.endPage ?? existing.endPage;
     validatePageRange(startPage, endPage, existing.book.pageCount);
+    const content =
+      parsed.data.content !== undefined ? normalizeText(parsed.data.content) : existing.content;
+    const { quoteText, quoteHash: quoteDigest } = resolveRevisionQuote(parsed.data.quote, {
+      quoteText: existing.quoteText,
+      quoteHash: existing.quoteHash
+    });
+    // 锚点页码、批注正文、引用摘录全部相同：视为重复提交，不再产生新版本
+    const unchanged =
+      startPage === existing.startPage &&
+      endPage === existing.endPage &&
+      content === existing.content &&
+      quoteText === existing.quoteText;
+    if (unchanged) {
+      return reply.status(200).send({ annotation: serializeAnnotation(existing), idempotent: true });
+    }
+    // 锚点页码移动或总页数变化后，以当前总页数重新拍下快照
+    const anchorPageCount =
+      startPage === existing.startPage && endPage === existing.endPage
+        ? existing.anchorPageCount
+        : existing.book.pageCount;
     const updated = await prisma.$transaction(async (tx) => {
       const result = await tx.annotation.updateMany({
         where: { id, userId, deletedAt: null, version: existing.version },
         data: {
           startPage,
           endPage,
-          ...(parsed.data.content !== undefined ? { content: normalizeText(parsed.data.content) } : {}),
+          content,
+          quoteText,
+          quoteHash: quoteDigest,
+          anchorPageCount,
           version: { increment: 1 }
         }
       });
       if (result.count !== 1) throw new AppError(409, 'STALE_WRITE', '批注已在其他位置被修改');
+      const updatedRow = await tx.annotation.findUniqueOrThrow({ where: { id } });
+      await tx.annotationRevision.create({
+        data: {
+          annotationId: id,
+          userId,
+          bookId: existing.bookId,
+          revisionNumber: updatedRow.version,
+          startPage: updatedRow.startPage,
+          endPage: updatedRow.endPage,
+          content: updatedRow.content,
+          quoteText: updatedRow.quoteText,
+          quoteHash: updatedRow.quoteHash,
+          anchorPageCount: updatedRow.anchorPageCount,
+          createdAt: updatedRow.updatedAt
+        }
+      });
       await writeEvent(tx, {
         userId,
         bookId: existing.bookId,
         entityType: 'ANNOTATION',
         entityId: id,
         action: 'UPDATED',
-        payload: { startPage, endPage }
+        payload: {
+          revisionNumber: updatedRow.version,
+          startPage,
+          endPage,
+          anchorPageCount: updatedRow.anchorPageCount,
+          hasQuote: quoteText !== null,
+          quoteChanged: existing.quoteText !== quoteText
+        }
       });
-      return tx.annotation.findUniqueOrThrow({ where: { id } });
+      return updatedRow;
     });
-    return { annotation: serializeAnnotation(updated) };
+    return { annotation: serializeAnnotation(updated), idempotent: false };
+  });
+
+  app.get('/annotations/:annotationId/verify', async (request) => {
+    const id = parseId((request.params as { annotationId: string }).annotationId, 'annotationId');
+    const userId = currentUser(request).id;
+    const existing = await prisma.annotation.findFirst({
+      where: { id, userId, deletedAt: null },
+      include: { book: { select: { pageCount: true, deletedAt: true } } }
+    });
+    if (!existing || existing.book.deletedAt) throw new AppError(404, 'NOT_FOUND', '批注不存在');
+    const verification = verifyAnchor(
+      {
+        startPage: existing.startPage,
+        endPage: existing.endPage,
+        quoteText: existing.quoteText,
+        quoteHash: existing.quoteHash,
+        anchorPageCount: existing.anchorPageCount
+      },
+      existing.book.pageCount
+    );
+    return {
+      annotationId: id,
+      ...verification,
+      anchorPageCount: existing.anchorPageCount,
+      checkedAt: new Date()
+    };
+  });
+
+  app.get('/annotations/:annotationId/revisions', async (request) => {
+    const id = parseId((request.params as { annotationId: string }).annotationId, 'annotationId');
+    const userId = currentUser(request).id;
+    const existing = await prisma.annotation.findFirst({
+      where: { id, userId },
+      include: { book: { select: { pageCount: true, deletedAt: true } } }
+    });
+    if (!existing) throw new AppError(404, 'NOT_FOUND', '批注不存在');
+    const revisions = await prisma.annotationRevision.findMany({
+      where: { annotationId: id, userId },
+      orderBy: { revisionNumber: 'desc' }
+    });
+    const currentPageCount = existing.book.pageCount;
+    // 每一次旧引用都按当前书目总页数独立校验，旧引用与当前摘录都可追溯
+    const items = revisions.map((revision) => ({
+      ...serializeRevision(revision),
+      verification: verifyAnchor(
+        {
+          startPage: revision.startPage,
+          endPage: revision.endPage,
+          quoteText: revision.quoteText,
+          quoteHash: revision.quoteHash,
+          anchorPageCount: revision.anchorPageCount
+        },
+        currentPageCount
+      )
+    }));
+    return { items };
   });
 
   app.delete('/annotations/:annotationId', async (request, reply) => {

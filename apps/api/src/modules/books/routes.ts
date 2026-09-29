@@ -136,17 +136,12 @@ function serializeBook(book: {
   };
 }
 
-async function maximumTracePage(userId: string, bookId: string): Promise<number> {
-  const [dogEar, annotation, reread] = await Promise.all([
+async function maximumNonAnnotationTracePage(userId: string, bookId: string): Promise<number> {
+  const [dogEar, reread] = await Promise.all([
     prisma.dogEar.aggregate({ where: { userId, bookId, deletedAt: null }, _max: { pageNumber: true } }),
-    prisma.annotation.aggregate({ where: { userId, bookId, deletedAt: null }, _max: { endPage: true } }),
     prisma.rereadMark.aggregate({ where: { userId, bookId, deletedAt: null }, _max: { pageNumber: true } })
   ]);
-  return Math.max(
-    dogEar._max.pageNumber ?? 0,
-    annotation._max.endPage ?? 0,
-    reread._max.pageNumber ?? 0
-  );
+  return Math.max(dogEar._max.pageNumber ?? 0, reread._max.pageNumber ?? 0);
 }
 
 export const bookRoutes: FastifyPluginAsync = async (app) => {
@@ -308,10 +303,17 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
     if (parsed.data.version && parsed.data.version !== existing.version) {
       throw new AppError(409, 'STALE_WRITE', '书目已在其他位置被修改，请刷新后重试');
     }
+    // 允许把总页数改小或清空：旧批注锚点保留创建时快照，
+    // 校验时会报告 PAGE_COUNT_CHANGED / OUT_OF_RANGE，而不是阻止修改。
+    // 其他痕迹（折角、重读页）仍要求当前页码落在新的总页数之内。
     if (parsed.data.pageCount !== undefined && parsed.data.pageCount !== null) {
-      const maxPage = await maximumTracePage(userId, bookId);
+      const maxPage = await maximumNonAnnotationTracePage(userId, bookId);
       if (parsed.data.pageCount < maxPage) {
-        throw new AppError(409, 'PAGE_COUNT_TOO_SMALL', `总页数不能小于已有痕迹的最大页码 ${maxPage}`);
+        throw new AppError(
+          409,
+          'PAGE_COUNT_TOO_SMALL',
+          `总页数不能小于已有折角或重读页的最大页码 ${maxPage}（批注跨页锚点不受限制，会在校验中标记）`
+        );
       }
     }
 
@@ -343,6 +345,9 @@ export const bookRoutes: FastifyPluginAsync = async (app) => {
         payload: {
           bookTitle: normalizeText(parsed.data.title ?? existing.title),
           previousStatus: existing.status,
+          ...(parsed.data.pageCount !== undefined
+            ? { previousPageCount: existing.pageCount, nextPageCount: parsed.data.pageCount }
+            : {})
         }
       });
       return tx.book.findUniqueOrThrow({ where: { id: bookId } });

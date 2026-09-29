@@ -50,6 +50,10 @@ npm run db:seed
 npm run dev
 ```
 
+> 批注跨页锚点功能（`annotation_revisions` 表）随迁移
+> `202609290001_annotation_anchors` 一起部署；迁移会为既有批注回填第 1 版快照。
+> 升级后首次启动前需执行一次 `npm run db:generate` 重新生成 Prisma Client。
+
 访问：
 
 - Web：<http://localhost:5173>
@@ -77,7 +81,7 @@ npm run dev
 2. 新建纸质书；
 3. 将书从“想读”切换到“阅读中”；
 4. 记录折角，同页不同原因被 `409` 拒绝；
-5. 创建单页或跨页批注；
+5. 创建单页或跨页批注，可附引用摘录并随时校验锚点；
 6. 同一页记录多次重读；
 7. 标记读完并保存 1 至 3 个情绪标签与文字；
 8. 在书目详情和全局时间线回看变化；
@@ -92,7 +96,26 @@ npm run dev
 - 折角使用 PostgreSQL 部分唯一索引，只约束未删除记录。
 - 完成感受使用 `completion_round` 区分多次读完整本书。
 - 书目和痕迹使用 `version` 防止多端写入覆盖。
+- 批注保存跨页锚点快照（起止页 + 当时总页数）与引用摘录的 SHA-256；
+  总页数或页码修改后，可通过 `GET /annotations/:id/verify` 校验，
+  差异分为 `PAGE_COUNT_CHANGED`、`PAGE_COUNT_CLEARED`、`OUT_OF_RANGE`、`QUOTE_HASH_MISMATCH`。
+- 每次批注修订都在同一事务写入不可变的 `annotation_revisions` 快照；
+  `GET /annotations/:id/revisions` 可逐版追溯旧引用与当前摘录，旧版本也按当前总页数独立校验。
+- 并发修订靠 `version` 乐观锁保证只落库一次：落败方收到 `409 STALE_WRITE`；
+  内容完全相同的重复提交返回 `idempotent`，不产生新版本。
 - 所有查询强制带 `userId` 条件，越权资源统一返回 404。
+
+### 批注跨页锚点与引用摘录
+
+- 创建/更新批注时可提交 `quote`（可空，最长 2000 字）；服务端归一化后保存原文与
+  SHA-256（`quote_hash`），同时记录锚点创建时的总页数 `anchor_page_count`。
+- `GET /api/v1/annotations/:id/verify` 返回当前锚点的校验结果：
+  `valid`、`issues`（`PAGE_COUNT_CHANGED` / `PAGE_COUNT_CLEARED` /
+  `OUT_OF_RANGE` / `QUOTE_HASH_MISMATCH`）、`anchorPageCount` 与 `checkedAt`。
+- `GET /api/v1/annotations/:id/revisions` 返回不可变修订快照列表，
+  每一版都带按当前总页数计算的 `verification`，旧引用与当前摘录可逐条追溯。
+- 更新批注必须带 `version`；并发提交落败的一方收到 `409 STALE_WRITE`。
+  与现有内容完全相同的重复提交返回 `200` 且 `idempotent: true`，不增加版本。
 
 ## 常用命令
 
